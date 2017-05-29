@@ -26,5 +26,6 @@ try {
 for ($i = 0; $i < 10; $i++) {
     $rcp->set('test' . $i, rand(1, 10000));
 }
+//$rcp->clear();
 
 $rcp->scan();

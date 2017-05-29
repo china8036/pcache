@@ -7,6 +7,8 @@ use Cpool\CpException;
 
 /*
  * redis 实现缓存池
+ * 1 更新操作
+ * 2 
  */
 
 class RedisCpool {
@@ -54,6 +56,11 @@ class RedisCpool {
      * @var string 
      */
     const LASTKEY = 'cpool_last';
+
+    /**
+     * 计数
+     */
+    const CONUTKEY = 'cpool_count';
 
     /**
      * 初始化
@@ -129,6 +136,7 @@ class RedisCpool {
             $createAt = time();
         }
         if (!$this->_rc->exists($bkey)) {//新建
+            $this->_updateCount();
             if ($this->exist(self::LASTKEY)) {
                 $this->updateNextKey($this->_getLastKey(), $key); //把上一次最后一个的next_value 指向本key
             }
@@ -143,7 +151,7 @@ class RedisCpool {
     }
 
     /**
-     * xxxx
+     * 删除一个key 
      * @param type $key
      * @return int 1 success 0 fail
      */
@@ -201,7 +209,21 @@ class RedisCpool {
      * 不用集成的set 因为这是辅助的主体逻辑如果走主题逻辑设置 逻辑判断复杂而且不清楚
      */
     private function _setFastKey($key) {
-        return $this->_rc->hSet($this->_buildKey(self::FASTKEY),self::VALUE_KEY, $key);
+        return $this->_rc->hSet($this->_buildKey(self::FASTKEY), self::VALUE_KEY, $key);
+    }
+
+    /**
+     * 链表计数器
+     * @return type
+     */
+    private function _updateCount() {
+        $key = $this->_buildKey(self::CONUTKEY);
+        $this->_rc->multi();//事物操作 也是原子操作
+        if (!$this->_rc->exists($key)) {
+            $this->_rc->hSet($key, self::VALUE_KEY, 0);
+        }
+        $this->_rc->hIncrBy($this->_buildKey(self::CONUTKEY), self::VALUE_KEY, 1);
+        $this->_rc->exec();
     }
 
     /**
@@ -214,8 +236,22 @@ class RedisCpool {
                 break;
             }
             foreach ($data as $dv) {
-                //$this->_rc->del($dv);
-                echo $dv . PHP_EOL . var_dump($this->_rc->hGetAll($dv));
+                echo $dv  .':' . var_export($this->_rc->hGetAll($dv), true) . PHP_EOL;
+            }
+        }
+    }
+
+    /**
+     * 
+     */
+    public function clear() {
+        while ($i_iterator !== 0) {
+            $data = $this->_rc->scan($i_iterator, null, null);
+            if (empty($data)) {
+                break;
+            }
+            foreach ($data as $dv) {
+                $this->_rc->del($dv);
             }
         }
     }
