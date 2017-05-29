@@ -14,7 +14,8 @@ require 'Redis/RedisCpool.php';
 
 $config = [
     'host' => '127.0.0.1',
-    'port' => 6379
+    'port' => 6379,
+    'passwd' => '11111111'
 ];
 try {
     $rcp = new \Cpool\Redis\RedisCpool($config);
@@ -22,3 +23,8 @@ try {
     echo $exc->getMessage();
 }
 
+for ($i = 0; $i < 1000; $i++) {
+    $rcp->set('test', 'xyssfg');
+}
+
+$rcp->scan();
