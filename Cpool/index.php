@@ -23,8 +23,8 @@ try {
     echo $exc->getMessage();
 }
 
-for ($i = 0; $i < 1000; $i++) {
-    $rcp->set('test', 'xyssfg');
+for ($i = 0; $i < 10; $i++) {
+    $rcp->set('test' . $i, rand(1, 10000));
 }
 
 $rcp->scan();
