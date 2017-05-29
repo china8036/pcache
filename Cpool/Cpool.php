@@ -32,12 +32,12 @@ interface Cpool {
     function del($key);
     
     
+    
     /**
-     * 更新
-     * @param type $key
-     * @param type $val
+     * 
+     * @param \callable $dataDriver
      */
-    function update($key, $val);
+    function dataAccess(callable $dataDriver);
     
     
 }

@@ -26,6 +26,12 @@ class RedisCpool {
     private $_keyPre = '';
 
     /**
+     * 最大记录数
+     * @var int 
+     */
+    private $_MaxLen = 10;
+
+    /**
      * 
      */
     const NEXT_KEY = 'next_key';
@@ -63,6 +69,16 @@ class RedisCpool {
     const CONUTKEY = 'cpool_count';
 
     /**
+     * 锁超时时间 锁会被手动删除 万一忘记手机删除 也只会在超时时间内被阻塞掉
+     */
+    const LOCK_TIMEOUT = 10;
+
+    /**
+     * 自定义锁
+     */
+    const LOCKKEY = 'cpool_lock';
+
+    /**
      * 初始化
      * @param array $config
      * @throws CpException
@@ -79,6 +95,9 @@ class RedisCpool {
         } catch (\RedisException $exc) {
             throw new CpException($exc->getMessage());
         }
+        if (!empty($config['maxLen']) && $config['maxLen'] > 1) {
+            $this->_MaxLen = $config['maxLen'];
+        }
         $this->_keyPre = $config['pre'];
         $this->_rc = $redis;
     }
@@ -88,9 +107,9 @@ class RedisCpool {
      * @param array $config
      */
     private function _initConfig(array &$config) {
-        $config['host'] = $config['host'] ?: '127.0.0.1';
-        $config['port'] = $config['port'] ?: 6379;
-        $config['pre'] = $config['pre'] ?: 'cpool_';
+        $config['host'] = empty($config['host']) ? '127.0.0.1' : $config['host'];
+        $config['port'] = empty($config['port']) ? 6379 : $config['port'];
+        $config['pre'] = empty($config['pre']) ? 'cpool_' : $config['pre'];
     }
 
     /**
@@ -135,8 +154,37 @@ class RedisCpool {
         if (!$createAt) {
             $createAt = time();
         }
+
         if (!$this->_rc->exists($bkey)) {//新建
-            $this->_updateCount();
+            $countKey = $this->_buildKey(self::CONUTKEY);
+            $lockKey = $this->_buildKey(self::LOCKKEY);
+            while (true) {
+                $nowTime = microtime(true);
+                if (!$this->_rc->setnx($lockKey, $nowTime)) {//如果未设置返回 true 已设置返回false  模拟原子操作但不是真正的原子操作可能会出问题
+                     $oldSetTime  = $this->_rc->get($lockKey);
+                     
+                    if($oldSetTime - $nowTime > self::LOCK_TIMEOUT){//防止加锁进程 加锁后崩溃 造成死锁 但是不是原子操作也不能保证
+                        //del 有可能被重复发 所以查询 占用 和锁定必须为一个原子操作 
+                        //在进程1进入到此处 但未删除lock时候 不能保证其他进程不进入到此处 所以 有可能多个进程同时进入到此处
+                        //然后多次发生del导致 下一个刚占用lock的进程 被del然后下一个进程继续进入 导致锁机制失败
+                        $this->_rc->del($lockKey);
+                        continue;
+                    }
+                    sleep(1);
+                    continue; //死循环
+                }
+                $this->_rc->expire($lockKey, self::LOCK_TIMEOUT);//设置超时时间
+                $this->_rc->hSetNx($countKey, self::VALUE_KEY, 0); //没有时候才会设置
+                $hasNum = $this->_rc->hGet($countKey, self::VALUE_KEY);
+                if ($hasNum >= $this->_MaxLen) {//超过设定数目不允许再设置
+                    $this->_rc->del($lockKey);
+                    return false;
+                }
+                $this->_rc->hIncrBy($countKey, self::VALUE_KEY, 1);//先占用一个名额
+                $this->_rc->del($lockKey);
+                break;
+            }
+
             if ($this->exist(self::LASTKEY)) {
                 $this->updateNextKey($this->_getLastKey(), $key); //把上一次最后一个的next_value 指向本key
             }
@@ -213,17 +261,17 @@ class RedisCpool {
     }
 
     /**
-     * 链表计数器
+     * 获取数量
      * @return type
      */
-    private function _updateCount() {
+    public function getCount() {
         $key = $this->_buildKey(self::CONUTKEY);
-        $this->_rc->multi();//事物操作 也是原子操作
+        $this->_rc->multi();
         if (!$this->_rc->exists($key)) {
             $this->_rc->hSet($key, self::VALUE_KEY, 0);
         }
-        $this->_rc->hIncrBy($this->_buildKey(self::CONUTKEY), self::VALUE_KEY, 1);
         $this->_rc->exec();
+        return $this->_rc->hGet($key, self::VALUE_KEY);
     }
 
     /**
@@ -236,7 +284,7 @@ class RedisCpool {
                 break;
             }
             foreach ($data as $dv) {
-                echo $dv  .':' . var_export($this->_rc->hGetAll($dv), true) . PHP_EOL;
+                echo $dv . ':' . var_export($this->_rc->hGetAll($dv), true) . PHP_EOL;
             }
         }
     }

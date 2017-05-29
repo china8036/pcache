@@ -29,3 +29,7 @@ for ($i = 0; $i < 10; $i++) {
 //$rcp->clear();
 
 $rcp->scan();
+$num = $rcp->getCount();
+//
+echo($num) . PHP_EOL
+        ;
