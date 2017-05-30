@@ -36,7 +36,13 @@ class RedisCpool {
      * @var type 
      */
     private $_dataAceess = '';
-    
+
+    /**
+     * 缓存有效时间
+     * @var int
+     */
+    private $_cacheTimeout = 1200;
+
     /**
      *
      */
@@ -105,11 +111,6 @@ class RedisCpool {
     const LOOP_SLEEP_UTIME = 10000;
 
     /**
-     * 多长时间没有命中就剔除缓存
-     */
-    const CACHE_TIMEOUT = 3600;
-    
-    /**
      * 自定义锁
      */
     const LOCKKEY = 'cpool_lock';
@@ -127,13 +128,18 @@ class RedisCpool {
         $redis = new \Redis();
         try {
             $redis->connect($config['host'], $config['port']);
-            $redis->auth($config['passwd']);
+            if (!empty($config['passwd'])) {
+                $redis->auth($config['passwd']);
+            }
             $redis->ping();
         } catch (\RedisException $exc) {
             throw new CpException($exc->getMessage());
         }
         if (!empty($config['maxLen']) && $config['maxLen'] > 1) {
             $this->_MaxLen = $config['maxLen'];
+        }
+        if (!empty($config['cacheTimeout'])) {
+            $this->_cacheTimeout = $config['cacheTimeout'];
         }
         $this->_dataAceess = $dataAccess;
         $this->_keyPre = $config['pre'];
@@ -167,14 +173,14 @@ class RedisCpool {
     public function get($cacheKey, $cacheTime = 0) {
         $key = $this->cacheKey2Key($cacheKey);
         $bkey = $this->_buildKey($key);
-        if(!$this->_lock()){//如果锁定失败则直接返回原始value
+        if (!$this->_lock()) {//如果锁定失败则直接返回原始value
             return $this->getOriginData($cacheKey);
         }
         if ($this->exist($key)) {
             $cacheInfo = $this->_rc->hGetAll($bkey);
             $cacheTime = intval($cacheTime);
             if ($cacheTime > 0) {
-                if ($cacheInfo[self::UPDATE_AT_KEY] - microtime(true) > self::CACHE_TIMEOUT) {//更新缓存内容
+                if ($cacheInfo[self::UPDATE_AT_KEY] - microtime(true) > $this->_cacheTimeout) {//更新缓存内容
                     $value = $this->getOriginData($cacheKey);
                     $this->_set($key, $cacheKey, $value); //更细缓存内容
                 }
@@ -198,6 +204,14 @@ class RedisCpool {
      */
     public function getOriginData($cacheKey) {
         return call_user_func($this->_dataAceess, $cacheKey);
+    }
+
+    /**
+     * 获取缓存超时时间
+     * @return type
+     */
+    public function getCacheTimeoutVal() {
+        return $this->_cacheTimeout;
     }
 
     /**
@@ -249,9 +263,9 @@ class RedisCpool {
             $this->_rc->hSetNx($countKey, self::VALUE_KEY, 0); //没有时候才会设置 初始化conut key
             $hasNum = $this->_rc->hGet($countKey, self::VALUE_KEY);
             if ($hasNum >= $this->_MaxLen) {//超过设定数目 判断第一个是否已失效
-                $firstKey = $this->_getFirstKey();
+                $firstKey = $this->getFirstKey();
                 $firstLastHitTime = $this->getField($firstKey, self::LAST_HIT_TIME);
-                if (microtime(true) - $firstLastHitTime > self::CACHE_TIMEOUT) {
+                if (microtime(true) - $firstLastHitTime > $this->_cacheTimeout) {
                     $secondKey = $this->getField($firstKey, self::NEXT_KEY);
                     if ($secondKey) {//没有发现 标示最后一个
                         $this->_setFirstKey($secondKey); //设置第二个为链接头
@@ -271,7 +285,7 @@ class RedisCpool {
                 $this->_setFirstKey($key);
             }
             if ($this->exist(self::LASTKEY)) {//如果有链表尾部 则把尾部的key的next key 设为本key
-                $lastKey = $this->_getLastKey();
+                $lastKey = $this->getLastKey();
                 $this->updateNextKey($lastKey, $key); //把上一次最后一个的next_key 指向本key
                 $this->_rc->hSet($bkey, self::PRE_KEY, $lastKey); //本key的上一个key
             }
@@ -331,7 +345,7 @@ class RedisCpool {
      * 获取最后一个
      * @return type
      */
-    private function _getLastKey() {
+    public function getLastKey() {
         return $this->getField(self::LASTKEY, self::VALUE_KEY);
     }
 
@@ -346,7 +360,7 @@ class RedisCpool {
      * 获取第一个key
      * @return type
      */
-    private function _getFirstKey() {
+    public function getFirstKey() {
         return $this->getField(self::FIRSTKEY, self::VALUE_KEY);
     }
 
@@ -365,11 +379,11 @@ class RedisCpool {
      * @return boolean
      */
     private function _change2Last($key, $keyInfo) {
-        $lastKey = $this->_getLastKey();
+        $lastKey = $this->getLastKey();
         if ($lastKey == $key) {//本来就是最后一个 直接返回成功
             return true;
         }
-        $firstKey = $this->_getFirstKey();
+        $firstKey = $this->getFirstKey();
         if ($firstKey == $key) {
             $nextKey = $keyInfo[self::NEXT_KEY];
             $this->_setFirstKey($nextKey); //设置第二个为头部链表
@@ -379,7 +393,7 @@ class RedisCpool {
         }
         $this->updateNextKey($lastKey, $key); //更新链表尾部的next key为本key
         $this->updatePreKey($key, $lastKey); //更新本key的 pre key为上一次的链表尾部
-        $this->_rc->hDel($this->_buildKey($key), self::NEXT_KEY);//删除next key 指向
+        $this->_rc->hDel($this->_buildKey($key), self::NEXT_KEY); //删除next key 指向
         $this->_setLastKey($key); //设置本key为链表尾部
         return true;
     }
@@ -390,7 +404,7 @@ class RedisCpool {
      */
     public function getCount() {
         $key = $this->_buildKey(self::CONUTKEY);
-        $this->_rc->hSetNx($key, self::VALUE_KEY, 0);//没有的话设置为0 有的话跳过
+        $this->_rc->hSetNx($key, self::VALUE_KEY, 0); //没有的话设置为0 有的话跳过
         return $this->_rc->hGet($key, self::VALUE_KEY);
     }
 
