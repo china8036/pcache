@@ -376,7 +376,8 @@ class RedisCpool {
             $this->updateNextKey($keyInfo[self::PRE_KEY], $keyInfo[self::NEXT_KEY]); //设置上一个元素的下一个元素为自己的下一个元素
         }
         $this->updateNextKey($lastKey, $key); //更新链表尾部的next key为本key
-        $$this->updatePreKey($key, $lastKey); //更新本key的 pre key为上一次的链表尾部
+        $this->updatePreKey($key, $lastKey); //更新本key的 pre key为上一次的链表尾部
+        $this->_rc->hDel($this->_buildKey($key), self::NEXT_KEY);//删除next key 指向
         $this->_setLastKey($key); //设置本key为链表尾部
         return true;
     }
