@@ -107,7 +107,7 @@ class RedisCpool {
     /**
      * 多长时间没有命中就剔除缓存
      */
-    const CACHE_TIMEOUT = 2;
+    const CACHE_TIMEOUT = 3600;
 
     /**
      * 自定义锁
@@ -167,7 +167,9 @@ class RedisCpool {
     public function get($cacheKey, $cacheTime = 0) {
         $key = $this->cacheKey2Key($cacheKey);
         $bkey = $this->_buildKey($key);
-        $this->_lock();
+        if(!$this->_lock()){//如果锁定失败则直接返回原始value
+            return $this->getOriginData($cacheKey);
+        }
         if ($this->exist($key)) {
             $cacheInfo = $this->_rc->hGetAll($bkey);
             $cacheTime = intval($cacheTime);
@@ -388,11 +390,7 @@ class RedisCpool {
      */
     public function getCount() {
         $key = $this->_buildKey(self::CONUTKEY);
-        $this->_rc->multi();
-        if (!$this->_rc->exists($key)) {
-            $this->_rc->hSet($key, self::VALUE_KEY, 0);
-        }
-        $this->_rc->exec();
+        $this->_rc->hSetNx($key, self::VALUE_KEY, 0);//没有的话设置为0 有的话跳过
         return $this->_rc->hGet($key, self::VALUE_KEY);
     }
 
