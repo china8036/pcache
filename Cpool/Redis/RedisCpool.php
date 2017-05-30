@@ -36,9 +36,9 @@ class RedisCpool {
      * @var type 
      */
     private $_dataAceess = '';
-
+    
     /**
-     * 
+     *
      */
     const NEXT_KEY = 'next_key';
 
@@ -108,7 +108,7 @@ class RedisCpool {
      * 多长时间没有命中就剔除缓存
      */
     const CACHE_TIMEOUT = 3600;
-
+    
     /**
      * 自定义锁
      */
@@ -174,7 +174,7 @@ class RedisCpool {
             $cacheInfo = $this->_rc->hGetAll($bkey);
             $cacheTime = intval($cacheTime);
             if ($cacheTime > 0) {
-                if ($cacheInfo[self::UPDATE_AT_KEY] - microtime(true) > self::CACHE_KEY) {//更新缓存内容
+                if ($cacheInfo[self::UPDATE_AT_KEY] - microtime(true) > self::CACHE_TIMEOUT) {//更新缓存内容
                     $value = $this->getOriginData($cacheKey);
                     $this->_set($key, $cacheKey, $value); //更细缓存内容
                 }
