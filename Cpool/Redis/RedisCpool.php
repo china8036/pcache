@@ -50,6 +50,11 @@ class RedisCpool {
     /**
      * 
      */
+    const LAST_HIT_TIME = 'last_hit_time';
+
+    /**
+     * 
+     */
     const CACHE_KEY = 'cache_key';
 
     /**
@@ -71,7 +76,7 @@ class RedisCpool {
      * php web 不能常驻内存 因此用redis的键存储相关信息
      * @var string 
      */
-    const FASTKEY = 'cpool_fast';
+    const FIRSTKEY = 'cpool_first';
 
     /**
      * php web 不能常驻内存 因此用redis的键存储相关信息
@@ -90,16 +95,26 @@ class RedisCpool {
     const LOCK_TIMEOUT = 10;
 
     /**
+     * 每一次loop的sleep时间 微秒 0.1秒
+     */
+    const LOOP_SLEEP_UTIME = 100000;
+
+    /**
+     * 多长时间没有命中就剔除缓存
+     */
+    const CACHE_TIMEOUT = 2;
+
+    /**
      * 自定义锁
      */
     const LOCKKEY = 'cpool_lock';
 
-   /**
-    * 初始化配置信息
-    * @param array $config 配置信息
-    * @param callable $dataAccess 请保证数据为字符串类型的
-    * @throws CpException
-    */
+    /**
+     * 初始化配置信息
+     * @param array $config 配置信息
+     * @param callable $dataAccess 请保证数据为字符串类型的
+     * @throws CpException
+     */
     public function __construct(array $config, callable $dataAccess) {
 
         $this->_initConfig($config);
@@ -151,21 +166,20 @@ class RedisCpool {
             $this->_set($key, $cacheKey, $value);
             return $value;
         }
-        $this->_rc->hIncrBy($this->_buildKey($key), self::HIT_COUNT_KEY, 1);
+        $bkey = $this->_buildKey($key);
+        $this->_rc->hIncrBy($bkey, self::HIT_COUNT_KEY, 1);
+        $this->_rc->hSet($bkey, self::LAST_HIT_TIME, microtime(true)); //最后的命中时间
         return $this->getField($key, self::VALUE_KEY);
     }
-    
-    
+
     /**
      * 获取原始数据
      * @param type $cacheKey
      * @return type
      */
-    public function getOriginData($cacheKey){
-        return  call_user_func($this->_dataAceess, $cacheKey);
+    public function getOriginData($cacheKey) {
+        return call_user_func($this->_dataAceess, $cacheKey);
     }
-    
-    
 
     /**
      * 存储
@@ -215,42 +229,58 @@ class RedisCpool {
         if (!$this->_rc->exists($bkey)) {//新建
             $countKey = $this->_buildKey(self::CONUTKEY);
             $lockKey = $this->_buildKey(self::LOCKKEY);
-            while (true) {
+            while (true) {//尝试获取锁
                 $nowTime = microtime(true);
                 if (!$this->_rc->setnx($lockKey, $nowTime)) {//如果未设置返回 true 已设置返回false  模拟原子操作但不是真正的原子操作可能会出问题
                     //以下是考虑锁定后程序立马崩溃的情况 这里暂时不考虑
-                     $oldSetTime  = $this->_rc->get($lockKey);
-                     if($oldSetTime - $nowTime > self::LOCK_TIMEOUT){//防止加锁进程 加锁后崩溃 造成死锁
-                        return false;//一定时间获取不到就放弃
+                    $oldSetTime = $this->_rc->get($lockKey);
+                    if ($nowTime - $oldSetTime > self::LOCK_TIMEOUT) {//防止加锁进程 加锁后崩溃 造成死锁
+                        return false; //一定时间获取不到就放弃
                     }
-                    usleep(100000); //0.1秒
-                    continue; //死循环
+                    usleep(self::LOOP_SLEEP_UTIME);
+                    continue; //死循环知道获取锁
                 }
+                //走到此处已经锁定
                 $this->_rc->expire($lockKey, self::LOCK_TIMEOUT); //设置超时时间
-                $this->_rc->hSetNx($countKey, self::VALUE_KEY, 0); //没有时候才会设置
+                $this->_rc->hSetNx($countKey, self::VALUE_KEY, 0); //没有时候才会设置 初始化conut key
                 $hasNum = $this->_rc->hGet($countKey, self::VALUE_KEY);
-                if ($hasNum >= $this->_MaxLen) {//超过设定数目不允许再设置
-                    $this->_rc->del($lockKey);
-                    return false;
+                if ($hasNum >= $this->_MaxLen) {//超过设定数目 判断第一个是否已失效
+                    echo $bkey . PHP_EOL;
+                    $firstKey = $this->_getFirstKey();
+                    $firstLastHitTime = $this->getField($firstKey, self::LAST_HIT_TIME);
+                    echo $firstLastHitTime . PHP_EOL;
+                    echo microtime(true) . PHP_EOL;
+                    if (microtime(true) - $firstLastHitTime > self::CACHE_TIMEOUT) {
+                        echo $bkey . 'timeout' . PHP_EOL;
+                        $secondKey = $this->getField($firstKey, self::NEXT_KEY);
+                        $this->_setFirstKey($secondKey); //设置第二个为头
+                        $this->del($firstKey); //删除第一个过期的缓存
+                        $this->_rc->hIncrBy($countKey, self::VALUE_KEY, -1); //减去一个名额
+                    } else {//否则直接失败
+                        $this->_rc->del($lockKey); //解除锁定
+                        return false; //直接退出
+                    }
                 }
+                //走到此处证明可以加入到缓存中
                 $this->_rc->hIncrBy($countKey, self::VALUE_KEY, 1); //先占用一个名额
-                $this->_rc->del($lockKey);
+                if (!$this->exist(self::FIRSTKEY)) {//是否设置了链表头部
+                    $this->_setFirstKey($key);
+                }
+                if ($this->exist(self::LASTKEY)) {//如果有链表尾部 则把尾部的key的next key 设为本key
+                    $this->updateNextKey($this->_getLastKey(), $key); //把上一次最后一个的next_value 指向本key
+                }
+                $this->_setLastKey($key); //设置本key为链表的尾部
+                $this->_rc->del($lockKey); //解除锁定
                 break;
             }
-
-            if ($this->exist(self::LASTKEY)) {
-                $this->updateNextKey($this->_getLastKey(), $key); //把上一次最后一个的next_value 指向本key
-            }
+            //此处为新建 但是不必要占用锁定状态
             $this->_rc->hSet($bkey, self::CACHE_KEY, $cacheKey);
             $this->_rc->hSet($bkey, self::HIT_COUNT_KEY, 0);
             $this->_rc->hSet($bkey, self::CREATE_AT_KEY, $createAt);
-            $this->_setLastKey($key);
-            if (!$this->exist(self::FASTKEY)) {
-                $this->_setFastKey($key);
-            }
+            $this->_rc->hSet($bkey, self::LAST_HIT_TIME, $createAt);
         }
         $this->_rc->hSet($bkey, self::VALUE_KEY, $value);
-        $this->_rc->hSet($bkey, self::UPDATE_AT_KEY, $updateAt);
+        $this->_rc->hSet($bkey, self::UPDATE_AT_KEY, $updateAt); //缓存更新时间
     }
 
     /**
@@ -303,16 +333,16 @@ class RedisCpool {
      * 获取第一个key
      * @return type
      */
-    private function _getFastKey() {
-        return $this->getField(self::FASTKEY, self::VALUE_KEY);
+    private function _getFirstKey() {
+        return $this->getField(self::FIRSTKEY, self::VALUE_KEY);
     }
 
     /**
      * 设置链表开头
      * 不用集成的set 因为这是辅助的主体逻辑如果走主题逻辑设置 逻辑判断复杂而且不清楚
      */
-    private function _setFastKey($key) {
-        return $this->_rc->hSet($this->_buildKey(self::FASTKEY), self::VALUE_KEY, $key);
+    private function _setFirstKey($key) {
+        return $this->_rc->hSet($this->_buildKey(self::FIRSTKEY), self::VALUE_KEY, $key);
     }
 
     /**

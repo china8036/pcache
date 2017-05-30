@@ -27,10 +27,11 @@ try {
     echo $exc->getMessage();
 }
 
+//$rcp->clear();
 //for ($i = 0; $i < 100; $i++) {
 //    $rcp->set('test' . $i, rand(1, 10000));
 //}
-//$rcp->clear();
+
 
 $rcp->scan();
 var_dump($rcp->get('test100'));
