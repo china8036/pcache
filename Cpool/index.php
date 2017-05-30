@@ -32,9 +32,8 @@ try {
 //    $rcp->set('test' . $i, rand(1, 10000));
 //}
 
-
+var_dump($rcp->get('test1'));
 $rcp->scan();
-var_dump($rcp->get('test100'));
 //$num = $rcp->getCount();
 //
 //echo($num) . PHP_EOL  ;

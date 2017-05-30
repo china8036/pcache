@@ -43,6 +43,11 @@ class RedisCpool {
     const NEXT_KEY = 'next_key';
 
     /**
+     * pre
+     */
+    const PRE_KEY = 'pre_key';
+
+    /**
      * 
      */
     const VALUE_KEY = 'value';
@@ -95,9 +100,9 @@ class RedisCpool {
     const LOCK_TIMEOUT = 10;
 
     /**
-     * 每一次loop的sleep时间 微秒 0.1秒
+     * 每一次loop的sleep时间 微秒 0.01秒
      */
-    const LOOP_SLEEP_UTIME = 100000;
+    const LOOP_SLEEP_UTIME = 10000;
 
     /**
      * 多长时间没有命中就剔除缓存
@@ -159,17 +164,29 @@ class RedisCpool {
      * @param type $cacheKey
      * @return type
      */
-    public function get($cacheKey) {
+    public function get($cacheKey, $cacheTime = 0) {
         $key = $this->cacheKey2Key($cacheKey);
-        if (!$this->exist($key)) {
+        $bkey = $this->_buildKey($key);
+        $this->_lock();
+        if ($this->exist($key)) {
+            $cacheInfo = $this->_rc->hGetAll($bkey);
+            $cacheTime = intval($cacheTime);
+            if ($cacheTime > 0) {
+                if ($cacheInfo[self::UPDATE_AT_KEY] - microtime(true) > self::CACHE_KEY) {//更新缓存内容
+                    $value = $this->getOriginData($cacheKey);
+                    $this->_set($key, $cacheKey, $value); //更细缓存内容
+                }
+            }
+            $this->_change2Last($key, $cacheInfo); //命中的排到尾部去 算是增加了权重(因为在表头的会优先被替代)
+            $this->_rc->hIncrBy($bkey, self::HIT_COUNT_KEY, 1);
+            $this->_rc->hSet($bkey, self::LAST_HIT_TIME, microtime(true)); //最后的命中时间
+            $value = isset($value) ? $value : $cacheInfo[self::VALUE_KEY];
+        } else {
             $value = $this->getOriginData($cacheKey);
             $this->_set($key, $cacheKey, $value);
-            return $value;
         }
-        $bkey = $this->_buildKey($key);
-        $this->_rc->hIncrBy($bkey, self::HIT_COUNT_KEY, 1);
-        $this->_rc->hSet($bkey, self::LAST_HIT_TIME, microtime(true)); //最后的命中时间
-        return $this->getField($key, self::VALUE_KEY);
+        $this->_unlock();
+        return $value;
     }
 
     /**
@@ -211,7 +228,7 @@ class RedisCpool {
     }
 
     /**
-     * 设置hash值
+     * 设置hash值 应该放在锁定状态里防止冲突
      * @param string $key
      * @param string $value
      * @param string $updateAt
@@ -225,59 +242,43 @@ class RedisCpool {
         if (!$createAt) {
             $createAt = time();
         }
-
         if (!$this->_rc->exists($bkey)) {//新建
             $countKey = $this->_buildKey(self::CONUTKEY);
-            $lockKey = $this->_buildKey(self::LOCKKEY);
-            while (true) {//尝试获取锁
-                $nowTime = microtime(true);
-                if (!$this->_rc->setnx($lockKey, $nowTime)) {//如果未设置返回 true 已设置返回false  模拟原子操作但不是真正的原子操作可能会出问题
-                    //以下是考虑锁定后程序立马崩溃的情况 这里暂时不考虑
-                    $oldSetTime = $this->_rc->get($lockKey);
-                    if ($nowTime - $oldSetTime > self::LOCK_TIMEOUT) {//防止加锁进程 加锁后崩溃 造成死锁
-                        return false; //一定时间获取不到就放弃
+            $this->_rc->hSetNx($countKey, self::VALUE_KEY, 0); //没有时候才会设置 初始化conut key
+            $hasNum = $this->_rc->hGet($countKey, self::VALUE_KEY);
+            if ($hasNum >= $this->_MaxLen) {//超过设定数目 判断第一个是否已失效
+                $firstKey = $this->_getFirstKey();
+                $firstLastHitTime = $this->getField($firstKey, self::LAST_HIT_TIME);
+                if (microtime(true) - $firstLastHitTime > self::CACHE_TIMEOUT) {
+                    $secondKey = $this->getField($firstKey, self::NEXT_KEY);
+                    if ($secondKey) {//没有发现 标示最后一个
+                        $this->_setFirstKey($secondKey); //设置第二个为链接头
+                    } else {
+                        $this->del(self::FIRSTKEY); //删除第一个 多为链表长度最大为一的情况
                     }
-                    usleep(self::LOOP_SLEEP_UTIME);
-                    continue; //死循环知道获取锁
+                    $this->_rc->hDel($this->_buildKey($secondKey), self::PRE_KEY); //删除前一元素记录
+                    $this->del($firstKey); //删除第一个过期的缓存
+                    $this->_rc->hIncrBy($countKey, self::VALUE_KEY, -1); //减去一个名额
+                } else {//否则直接失败
+                    return false; //直接退出
                 }
-                //走到此处已经锁定
-                $this->_rc->expire($lockKey, self::LOCK_TIMEOUT); //设置超时时间
-                $this->_rc->hSetNx($countKey, self::VALUE_KEY, 0); //没有时候才会设置 初始化conut key
-                $hasNum = $this->_rc->hGet($countKey, self::VALUE_KEY);
-                if ($hasNum >= $this->_MaxLen) {//超过设定数目 判断第一个是否已失效
-                    echo $bkey . PHP_EOL;
-                    $firstKey = $this->_getFirstKey();
-                    $firstLastHitTime = $this->getField($firstKey, self::LAST_HIT_TIME);
-                    echo $firstLastHitTime . PHP_EOL;
-                    echo microtime(true) . PHP_EOL;
-                    if (microtime(true) - $firstLastHitTime > self::CACHE_TIMEOUT) {
-                        echo $bkey . 'timeout' . PHP_EOL;
-                        $secondKey = $this->getField($firstKey, self::NEXT_KEY);
-                        $this->_setFirstKey($secondKey); //设置第二个为头
-                        $this->del($firstKey); //删除第一个过期的缓存
-                        $this->_rc->hIncrBy($countKey, self::VALUE_KEY, -1); //减去一个名额
-                    } else {//否则直接失败
-                        $this->_rc->del($lockKey); //解除锁定
-                        return false; //直接退出
-                    }
-                }
-                //走到此处证明可以加入到缓存中
-                $this->_rc->hIncrBy($countKey, self::VALUE_KEY, 1); //先占用一个名额
-                if (!$this->exist(self::FIRSTKEY)) {//是否设置了链表头部
-                    $this->_setFirstKey($key);
-                }
-                if ($this->exist(self::LASTKEY)) {//如果有链表尾部 则把尾部的key的next key 设为本key
-                    $this->updateNextKey($this->_getLastKey(), $key); //把上一次最后一个的next_value 指向本key
-                }
-                $this->_setLastKey($key); //设置本key为链表的尾部
-                $this->_rc->del($lockKey); //解除锁定
-                break;
             }
-            //此处为新建 但是不必要占用锁定状态
+            //走到此处证明可以加入到缓存中
+            $this->_rc->hIncrBy($countKey, self::VALUE_KEY, 1); //先占用一个名额
+            if (!$this->exist(self::FIRSTKEY)) {//是否设置了链表头部
+                $this->_setFirstKey($key);
+            }
+            if ($this->exist(self::LASTKEY)) {//如果有链表尾部 则把尾部的key的next key 设为本key
+                $lastKey = $this->_getLastKey();
+                $this->updateNextKey($lastKey, $key); //把上一次最后一个的next_key 指向本key
+                $this->_rc->hSet($bkey, self::PRE_KEY, $lastKey); //本key的上一个key
+            }
+            $this->_setLastKey($key); //设置本key为链表的尾部
             $this->_rc->hSet($bkey, self::CACHE_KEY, $cacheKey);
             $this->_rc->hSet($bkey, self::HIT_COUNT_KEY, 0);
             $this->_rc->hSet($bkey, self::CREATE_AT_KEY, $createAt);
             $this->_rc->hSet($bkey, self::LAST_HIT_TIME, $createAt);
+        } else {//更新操作
         }
         $this->_rc->hSet($bkey, self::VALUE_KEY, $value);
         $this->_rc->hSet($bkey, self::UPDATE_AT_KEY, $updateAt); //缓存更新时间
@@ -297,12 +298,22 @@ class RedisCpool {
      * 更新健值
      * @param string $key
      * @param string $val
-     * @param int $updateTime
      * @return int 1 success 0 fail
      */
     public function updateNextKey($key, $nextKey) {
         $key = $this->_buildKey($key);
         return $this->_rc->hSet($key, self::NEXT_KEY, $nextKey);
+    }
+
+    /**
+     * 更新prekey
+     * @param string $key
+     * @param type $preKey
+     * @return type
+     */
+    public function updatePreKey($key, $preKey) {
+        $key = $this->_buildKey($key);
+        return $this->_rc->hSet($key, self::PRE_KEY, $preKey);
     }
 
     /**
@@ -346,6 +357,31 @@ class RedisCpool {
     }
 
     /**
+     * 把链表中的一个元素移动到尾部
+     * @param string $key
+     * @param array $keyInfo
+     * @return boolean
+     */
+    private function _change2Last($key, $keyInfo) {
+        $lastKey = $this->_getLastKey();
+        if ($lastKey == $key) {//本来就是最后一个 直接返回成功
+            return true;
+        }
+        $firstKey = $this->_getFirstKey();
+        if ($firstKey == $key) {
+            $nextKey = $keyInfo[self::NEXT_KEY];
+            $this->_setFirstKey($nextKey); //设置第二个为头部链表
+            $this->_rc->hDel($this->_buildKey($nextKey), self::PRE_KEY); //删除它pre_key记录
+        } else {
+            $this->updateNextKey($keyInfo[self::PRE_KEY], $keyInfo[self::NEXT_KEY]); //设置上一个元素的下一个元素为自己的下一个元素
+        }
+        $this->updateNextKey($lastKey, $key); //更新链表尾部的next key为本key
+        $$this->updatePreKey($key, $lastKey); //更新本key的 pre key为上一次的链表尾部
+        $this->_setLastKey($key); //设置本key为链表尾部
+        return true;
+    }
+
+    /**
      * 获取数量
      * @return type
      */
@@ -357,6 +393,37 @@ class RedisCpool {
         }
         $this->_rc->exec();
         return $this->_rc->hGet($key, self::VALUE_KEY);
+    }
+
+    /**
+     * 尝试在一定时间内锁定redis
+     * @return boolean
+     */
+    private function _lock() {
+        $lockKey = $this->_buildKey(self::LOCKKEY);
+        while (true) {//尝试获取锁
+            $nowTime = microtime(true);
+            if (!$this->_rc->setnx($lockKey, $nowTime)) {//如果未设置返回 true 已设置返回false  模拟原子操作但不是真正的原子操作可能会出问题
+                //以下是考虑锁定后程序立马崩溃的情况 这里暂时不考虑
+                $oldSetTime = $this->_rc->get($lockKey);
+                if ($nowTime - $oldSetTime > self::LOCK_TIMEOUT) {//防止加锁进程 加锁后崩溃 造成死锁
+                    return false; //一定时间获取不到就放弃
+                }
+                usleep(self::LOOP_SLEEP_UTIME);
+                continue; //死循环知道获取锁
+            }
+            $this->_rc->expire($lockKey, self::LOCK_TIMEOUT); //设置超时时间 防止防止程序异常崩溃时无人解锁 这样redis会自动删除lockkey
+            break; //此处标识以获取到锁所以退出循环
+        }
+        return true;
+    }
+
+    /**
+     * 解锁
+     * @return type
+     */
+    private function _unlock() {
+        $this->_rc->del($this->_buildKey(self::LOCKKEY));
     }
 
     /**
