@@ -33,7 +33,7 @@ try {
 //$rcp->clear();
 
 $rcp->scan();
-var_dump($rcp->get('test1'));
+var_dump($rcp->get('test100'));
 //$num = $rcp->getCount();
 //
 //echo($num) . PHP_EOL  ;

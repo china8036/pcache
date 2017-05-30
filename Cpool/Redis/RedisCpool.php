@@ -94,11 +94,12 @@ class RedisCpool {
      */
     const LOCKKEY = 'cpool_lock';
 
-    /**
-     * 初始化
-     * @param array $config
-     * @throws CpException
-     */
+   /**
+    * 初始化配置信息
+    * @param array $config 配置信息
+    * @param callable $dataAccess 请保证数据为字符串类型的
+    * @throws CpException
+    */
     public function __construct(array $config, callable $dataAccess) {
 
         $this->_initConfig($config);
@@ -120,7 +121,7 @@ class RedisCpool {
     }
 
     /**
-     * 
+     * 格式化配置信息
      * @param array $config
      */
     private function _initConfig(array &$config) {
@@ -146,7 +147,7 @@ class RedisCpool {
     public function get($cacheKey) {
         $key = $this->cacheKey2Key($cacheKey);
         if (!$this->exist($key)) {
-            $value = ($this->_dataAceess)($cacheKey);
+            $value = $this->getOriginData($cacheKey);
             $this->_set($key, $cacheKey, $value);
             return $value;
         }
@@ -155,10 +156,19 @@ class RedisCpool {
     }
     
     
+    /**
+     * 获取原始数据
+     * @param type $cacheKey
+     * @return type
+     */
+    public function getOriginData($cacheKey){
+        return  call_user_func($this->_dataAceess, $cacheKey);
+    }
+    
     
 
     /**
-     * cacheKey to Key
+     * 存储
      * @param type $cacheKey
      * @param type $value
      * @return type
@@ -168,7 +178,7 @@ class RedisCpool {
     }
 
     /**
-     * 
+     * 转换关键词为 key
      * @param type $key
      * @return type
      */
@@ -177,7 +187,7 @@ class RedisCpool {
     }
 
     /**
-     * 
+     * 获取一个键的某个字段的字
      * @param type $key
      * @param type $field
      * @return type
@@ -275,7 +285,7 @@ class RedisCpool {
     }
 
     /**
-     * 
+     * 获取最后一个
      * @return type
      */
     private function _getLastKey() {
@@ -290,7 +300,7 @@ class RedisCpool {
     }
 
     /**
-     * 
+     * 获取第一个key
      * @return type
      */
     private function _getFastKey() {
@@ -320,7 +330,7 @@ class RedisCpool {
     }
 
     /**
-     * 
+     * 扫描
      */
     public function scan() {
         while (!isset($i_iterator) || $i_iterator !== 0) {
@@ -335,7 +345,7 @@ class RedisCpool {
     }
 
     /**
-     * 
+     * 清空
      */
     public function clear() {
         while (!isset($i_iterator) || $i_iterator !== 0) {
