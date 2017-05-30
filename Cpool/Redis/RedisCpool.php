@@ -32,6 +32,12 @@ class RedisCpool {
     private $_MaxLen = 10;
 
     /**
+     * 数据回调
+     * @var type 
+     */
+    private $_dataAceess = '';
+
+    /**
      * 
      */
     const NEXT_KEY = 'next_key';
@@ -40,6 +46,16 @@ class RedisCpool {
      * 
      */
     const VALUE_KEY = 'value';
+
+    /**
+     * 
+     */
+    const CACHE_KEY = 'cache_key';
+
+    /**
+     * 
+     */
+    const HIT_COUNT_KEY = 'hit_count';
 
     /**
      * 
@@ -83,7 +99,7 @@ class RedisCpool {
      * @param array $config
      * @throws CpException
      */
-    public function __construct(array $config) {
+    public function __construct(array $config, callable $dataAccess) {
 
         $this->_initConfig($config);
         //连接本地的 Redis 服务
@@ -98,6 +114,7 @@ class RedisCpool {
         if (!empty($config['maxLen']) && $config['maxLen'] > 1) {
             $this->_MaxLen = $config['maxLen'];
         }
+        $this->_dataAceess = $dataAccess;
         $this->_keyPre = $config['pre'];
         $this->_rc = $redis;
     }
@@ -123,18 +140,48 @@ class RedisCpool {
 
     /**
      * 获取值
+     * @param type $cacheKey
+     * @return type
+     */
+    public function get($cacheKey) {
+        $key = $this->cacheKey2Key($cacheKey);
+        if (!$this->exist($key)) {
+            $value = ($this->_dataAceess)($cacheKey);
+            $this->_set($key, $cacheKey, $value);
+            return $value;
+        }
+        $this->_rc->hIncrBy($this->_buildKey($key), self::HIT_COUNT_KEY, 1);
+        return $this->getField($key, self::VALUE_KEY);
+    }
+    
+    
+    
+
+    /**
+     * cacheKey to Key
+     * @param type $cacheKey
+     * @param type $value
+     * @return type
+     */
+    public function set($cacheKey, $value) {
+        return $this->_set($this->cacheKey2Key($cacheKey), $cacheKey, $value);
+    }
+
+    /**
+     * 
      * @param type $key
      * @return type
      */
-    public function get($key) {
-        if (!$this->exist($key)) {
-            return false;
-        }
-        $key = $this->_buildKey($key);
-        return $this->_rc->hGetAll($key);
-        ;
+    public function cacheKey2Key($key) {
+        return md5($key);
     }
 
+    /**
+     * 
+     * @param type $key
+     * @param type $field
+     * @return type
+     */
     public function getField($key, $field) {
         return $this->_rc->hGet($this->_buildKey($key), $field);
     }
@@ -146,7 +193,7 @@ class RedisCpool {
      * @param string $updateAt
      * @param string $createAt
      */
-    public function set($key, $value, $updateAt = null, $createAt = null) {
+    private function _set($key, $cacheKey, $value, $updateAt = null, $createAt = null) {
         $bkey = $this->_buildKey($key);
         if (!$updateAt) {
             $updateAt = time();
@@ -161,26 +208,22 @@ class RedisCpool {
             while (true) {
                 $nowTime = microtime(true);
                 if (!$this->_rc->setnx($lockKey, $nowTime)) {//如果未设置返回 true 已设置返回false  模拟原子操作但不是真正的原子操作可能会出问题
+                    //以下是考虑锁定后程序立马崩溃的情况 这里暂时不考虑
                      $oldSetTime  = $this->_rc->get($lockKey);
-                     
-                    if($oldSetTime - $nowTime > self::LOCK_TIMEOUT){//防止加锁进程 加锁后崩溃 造成死锁 但是不是原子操作也不能保证
-                        //del 有可能被重复发 所以查询 占用 和锁定必须为一个原子操作 
-                        //在进程1进入到此处 但未删除lock时候 不能保证其他进程不进入到此处 所以 有可能多个进程同时进入到此处
-                        //然后多次发生del导致 下一个刚占用lock的进程 被del然后下一个进程继续进入 导致锁机制失败
-                        $this->_rc->del($lockKey);
-                        continue;
+                     if($oldSetTime - $nowTime > self::LOCK_TIMEOUT){//防止加锁进程 加锁后崩溃 造成死锁
+                        return false;//一定时间获取不到就放弃
                     }
-                    sleep(1);
+                    usleep(100000); //0.1秒
                     continue; //死循环
                 }
-                $this->_rc->expire($lockKey, self::LOCK_TIMEOUT);//设置超时时间
+                $this->_rc->expire($lockKey, self::LOCK_TIMEOUT); //设置超时时间
                 $this->_rc->hSetNx($countKey, self::VALUE_KEY, 0); //没有时候才会设置
                 $hasNum = $this->_rc->hGet($countKey, self::VALUE_KEY);
                 if ($hasNum >= $this->_MaxLen) {//超过设定数目不允许再设置
                     $this->_rc->del($lockKey);
                     return false;
                 }
-                $this->_rc->hIncrBy($countKey, self::VALUE_KEY, 1);//先占用一个名额
+                $this->_rc->hIncrBy($countKey, self::VALUE_KEY, 1); //先占用一个名额
                 $this->_rc->del($lockKey);
                 break;
             }
@@ -188,6 +231,8 @@ class RedisCpool {
             if ($this->exist(self::LASTKEY)) {
                 $this->updateNextKey($this->_getLastKey(), $key); //把上一次最后一个的next_value 指向本key
             }
+            $this->_rc->hSet($bkey, self::CACHE_KEY, $cacheKey);
+            $this->_rc->hSet($bkey, self::HIT_COUNT_KEY, 0);
             $this->_rc->hSet($bkey, self::CREATE_AT_KEY, $createAt);
             $this->_setLastKey($key);
             if (!$this->exist(self::FASTKEY)) {
@@ -278,7 +323,7 @@ class RedisCpool {
      * 
      */
     public function scan() {
-        while ($i_iterator !== 0) {
+        while (!isset($i_iterator) || $i_iterator !== 0) {
             $data = $this->_rc->scan($i_iterator, null, null);
             if (empty($data)) {
                 break;
@@ -293,7 +338,7 @@ class RedisCpool {
      * 
      */
     public function clear() {
-        while ($i_iterator !== 0) {
+        while (!isset($i_iterator) || $i_iterator !== 0) {
             $data = $this->_rc->scan($i_iterator, null, null);
             if (empty($data)) {
                 break;
