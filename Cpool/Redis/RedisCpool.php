@@ -11,7 +11,7 @@ use Cpool\CpException;
  * 2 
  */
 
-class RedisCpool {
+class RedisCpool implements Cpool {
 
     /**
      *
@@ -180,7 +180,7 @@ class RedisCpool {
             $cacheInfo = $this->_rc->hGetAll($bkey);
             $cacheTime = intval($cacheTime);
             if ($cacheTime > 0) {
-                if ($cacheInfo[self::UPDATE_AT_KEY] - microtime(true) > $this->_cacheTimeout) {//更新缓存内容
+                if ( microtime(true) - $cacheInfo[self::UPDATE_AT_KEY] > $cacheTime) {//更新缓存内容
                     $value = $this->getOriginData($cacheKey);
                     $this->_set($key, $cacheKey, $value); //更细缓存内容
                 }
